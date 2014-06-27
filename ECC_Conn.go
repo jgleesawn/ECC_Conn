@@ -10,22 +10,21 @@ import (
 	"crypto/cipher"
 	"errors"
 	"io"
-	"fmt"
+	"encoding/binary"
+//	"fmt"
 )
 
 type ECC_Conn struct {
 	key	[]byte
 	conn	*websocket.Conn
-	RPacketSize int
-	WPacketSize int
+	PacketSize int
 	BlockSize int
 }
 // D x G ->  P;  D x tP -> Q;
 //tD x G -> tP; tD x  P -> Q;
 func (x *ECC_Conn) Connect(conn *websocket.Conn) {
 	//Fix this, poor form.
-	x.RPacketSize = 1024
-	x.WPacketSize = 1024
+	x.PacketSize = 1024
 	x.BlockSize = aes.BlockSize
 	mt := websocket.BinaryMessage
 	msg := make([]byte,1000)
@@ -35,7 +34,7 @@ func (x *ECC_Conn) Connect(conn *websocket.Conn) {
 	}
 	rnd := bytes.NewBuffer(msg)
 
-	c := elliptic.P224()
+	c := elliptic.P521()
 	D,Px,Py,_ := elliptic.GenerateKey(c,rnd)
 	Pmarsh := elliptic.Marshal(c,Px,Py)
 	conn.WriteMessage(mt,Pmarsh)
@@ -51,30 +50,41 @@ func (x *ECC_Conn) Connect(conn *websocket.Conn) {
 	x.key = kdf(k,salt,10000)
 	x.conn = conn
 }
+//2 is hardwired in to describe a Uint16 wrt datalength.
 func (x *ECC_Conn) Write(p []byte) (n int, err error) {
 	start := 0
 	end := len(p)
-	if len(p) >= x.WPacketSize-x.BlockSize{
-		end = x.WPacketSize-x.BlockSize
+	PayloadLen := x.PacketSize-x.BlockSize-2
+	//2 is for size of Uint16 which is prepended to each data
+	//stores how many bytes of data are in the block
+	if len(p) >= PayloadLen{
+		end = PayloadLen
 	} 
 
-	data := make([]byte,x.WPacketSize-x.BlockSize)
+	data := make([]byte,x.PacketSize-x.BlockSize)
 	for end < len(p) {
-		copy(data[0:],p[start:end])
+		l := make([]byte,2)
+		binary.PutUvarint(l,uint64(end-start))
+		copy(data[0:2],l)	//length of data is at beg of chunk
+
+		copy(data[2:],p[start:end])
 		cipher := encrypt(x.key,data)
-		fmt.Println("Cipher Size:",len(cipher))
+		//fmt.Println("Cipher Size:",len(cipher))
 		err = x.conn.WriteMessage(websocket.BinaryMessage,cipher)
 		if err != nil {
 			return end,err
 		}
 		start = end
-		end += x.WPacketSize-x.BlockSize
+		end += PayloadLen
 	}
-	copy(data[0:],p[start:])
+	l := make([]byte,2)
+	binary.PutUvarint(l,uint64(len(p)-start))
+	copy(data[0:2],l)
+	copy(data[2:],p[start:])
 
-	rem := (x.WPacketSize-x.BlockSize)-(end-len(p))
-	zeros := make([]byte,end-len(p))
-	copy(data[rem:],zeros)
+	rem := PayloadLen-len(p[start:])
+	zeros := make([]byte,rem)
+	copy(data[2+len(p[start:]):],zeros)   //Zeros out rest of the chunk
 
 	cipher := encrypt(x.key,data)
 	err = x.conn.WriteMessage(websocket.BinaryMessage,cipher)
@@ -84,20 +94,14 @@ func (x *ECC_Conn) Write(p []byte) (n int, err error) {
 //so p needs to have a size of ReadBufferSize or greater
 //from websocket upgrader
 func (x *ECC_Conn) Read(p []byte) (n int, err error) {
-	//fmt.Println(len(p))
 	_,cipher,err := x.conn.ReadMessage()
-	//p = make([]byte,len(cipher))
-	//fmt.Println(len(p))
-	//fmt.Println("Read Cipher Length:",len(cipher))
-	//fmt.Println("Block Size:", x.BlockSize)
 	if len(cipher) % x.BlockSize != 0 {
 		return 0,errors.New("Incoming cipher is not a multiple of block size.")
 	}
-	//fmt.Println("Read Cipher Length:",len(cipher))
-	copy(p[:len(cipher)], decrypt(x.key,cipher))
-	copy(p[:len(cipher)-aes.BlockSize], p[aes.BlockSize:])
-	//fmt.Println(string(p))
-	return len(p),err
+	text := decrypt(x.key,cipher)
+	l,_ := binary.Uvarint(text[0:2])
+	copy(p[:l], text[2:])
+	return int(l),err
 }
 //Bounds might throw errors, careful.
 func kdf(k []byte,salt []byte,c int) []byte {
@@ -132,13 +136,10 @@ func decrypt(key, ciphertext []byte) []byte {
 	if err != nil {
 		panic(err)
 	}
-	text := make([]byte,len(ciphertext)-aes.BlockSize)
-	prev := len(ciphertext)-aes.BlockSize*2
-	start := len(ciphertext)-aes.BlockSize
-//	end := len(ciphertext)
+	text := make([]byte,len(ciphertext))
+	iv := ciphertext[:aes.BlockSize]
 //Gives offset so Crypt function index doesn't go out of bounds
 	ciphertext = ciphertext[aes.BlockSize:] 
-	iv := ciphertext[prev:start]
 	
 	cbc := cipher.NewCBCDecrypter(block,iv)
 	cbc.CryptBlocks(text,ciphertext)
