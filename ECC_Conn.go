@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/aes"
 	"crypto/cipher"
+	"errors"
 	"io"
 	"fmt"
 )
@@ -15,12 +16,16 @@ import (
 type ECC_Conn struct {
 	key	[]byte
 	conn	*websocket.Conn
+	RPacketSize int
+	WPacketSize int
 	BlockSize int
 }
 // D x G ->  P;  D x tP -> Q;
 //tD x G -> tP; tD x  P -> Q;
 func (x *ECC_Conn) Connect(conn *websocket.Conn) {
 	//Fix this, poor form.
+	x.RPacketSize = 1024
+	x.WPacketSize = 1024
 	x.BlockSize = aes.BlockSize
 	mt := websocket.BinaryMessage
 	msg := make([]byte,1000)
@@ -47,14 +52,30 @@ func (x *ECC_Conn) Connect(conn *websocket.Conn) {
 	x.conn = conn
 }
 func (x *ECC_Conn) Write(p []byte) (n int, err error) {
-	diff := x.BlockSize-(len(p)%x.BlockSize)
-	var data []byte
-	if diff != 0 {
-		data = make([]byte,len(p)+diff)
-		copy(data[:len(p)],p)
-	} else {
-		data = p
+	start := 0
+	end := len(p)
+	if len(p) >= x.WPacketSize-x.BlockSize{
+		end = x.WPacketSize-x.BlockSize
+	} 
+
+	data := make([]byte,x.WPacketSize-x.BlockSize)
+	for end < len(p) {
+		copy(data[0:],p[start:end])
+		cipher := encrypt(x.key,data)
+		fmt.Println("Cipher Size:",len(cipher))
+		err = x.conn.WriteMessage(websocket.BinaryMessage,cipher)
+		if err != nil {
+			return end,err
+		}
+		start = end
+		end += x.WPacketSize-x.BlockSize
 	}
+	copy(data[0:],p[start:])
+
+	rem := (x.WPacketSize-x.BlockSize)-(end-len(p))
+	zeros := make([]byte,end-len(p))
+	copy(data[rem:],zeros)
+
 	cipher := encrypt(x.key,data)
 	err = x.conn.WriteMessage(websocket.BinaryMessage,cipher)
 	return len(p),err
@@ -67,9 +88,15 @@ func (x *ECC_Conn) Read(p []byte) (n int, err error) {
 	_,cipher,err := x.conn.ReadMessage()
 	//p = make([]byte,len(cipher))
 	//fmt.Println(len(p))
+	//fmt.Println("Read Cipher Length:",len(cipher))
+	//fmt.Println("Block Size:", x.BlockSize)
+	if len(cipher) % x.BlockSize != 0 {
+		return 0,errors.New("Incoming cipher is not a multiple of block size.")
+	}
+	//fmt.Println("Read Cipher Length:",len(cipher))
 	copy(p[:len(cipher)], decrypt(x.key,cipher))
 	copy(p[:len(cipher)-aes.BlockSize], p[aes.BlockSize:])
-	fmt.Println(string(p))
+	//fmt.Println(string(p))
 	return len(p),err
 }
 //Bounds might throw errors, careful.
