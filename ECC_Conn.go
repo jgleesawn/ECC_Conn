@@ -1,3 +1,5 @@
+//Use pbkdf2 instead of custom kdf
+//Change code to use actual salt/password instead of hardcoded value.
 package ECC_Conn
 
 import (
