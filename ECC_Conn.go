@@ -122,7 +122,7 @@ func (x *ECC_Conn) Write(p []byte) (n int, err error) {
 		//fmt.Println("Cipher Size:",len(cipher))
 		err = x.conn.WriteMessage(websocket.BinaryMessage,cipher)
 		if err != nil {
-			return end,err
+			return start,err
 		}
 		start = end
 		end += x.PayloadLen
@@ -138,6 +138,9 @@ func (x *ECC_Conn) Write(p []byte) (n int, err error) {
 	hm.Write(cipher[:HMACBlock])
 	copy(cipher[HMACBlock:],hm.Sum(nil))
 	err = x.conn.WriteMessage(websocket.BinaryMessage,cipher)
+	if err != nil {
+		return start,err
+	}
 	return len(p),err
 }
 //Can't assign buffer within the function
